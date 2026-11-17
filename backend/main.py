@@ -21,6 +21,12 @@ import re
 from backend.database import SessionLocal
 from backend.models import Conversation, Message
 
+# Autonomous Task Orchestrator (ATO)
+from backend.database import Base, engine
+from backend.ato import models as ato_models  # registers ATO tables with SQLAlchemy metadata
+from sqlalchemy import inspect, text
+from backend.ato.router import router as orchestrator_router
+
 # RAG
 from backend.rag.rag_pipeline import (
     retrieve_context,
@@ -36,6 +42,34 @@ from backend.rag.ingest import ingest_document
 app = FastAPI(
     title="Local AI Chatbot"
 )
+
+# Create newly-added ATO tables without replacing existing chatbot tables.
+@app.on_event("startup")
+def create_ato_tables():
+    Base.metadata.create_all(bind=engine)
+
+    # create_all does not add columns to an existing SQLite table.
+    # Apply these additive columns safely for existing ATO databases.
+    inspector = inspect(engine)
+    if "ato_jobs" in inspector.get_table_names():
+        existing = {column["name"] for column in inspector.get_columns("ato_jobs")}
+        additions = {
+            "output": "TEXT",
+            "error": "TEXT",
+            "started_at": "DATETIME",
+            "completed_at": "DATETIME",
+            "progress_current": "INTEGER NOT NULL DEFAULT 0",
+            "progress_total": "INTEGER NOT NULL DEFAULT 0",
+            "progress_stage": "VARCHAR(80)",
+        }
+        with engine.begin() as connection:
+            for column_name, column_type in additions.items():
+                if column_name not in existing:
+                    connection.execute(text(
+                        f"ALTER TABLE ato_jobs ADD COLUMN {column_name} {column_type}"
+                    ))
+
+app.include_router(orchestrator_router)
 
 app.add_middleware(
     CORSMiddleware,
